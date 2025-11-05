@@ -1,167 +1,177 @@
 import feedparser
 import ssl
 import requests
+import random
+import smtplib
 from bs4 import BeautifulSoup
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from openai import OpenAI
 
-# Fix for potential SSL/TLS issues when fetching certain RSS feeds on some systems.
+# --- CONFIGURATION ---
+# Your OpenAI API Key
+OPENAI_API_KEY = "your open ai api key here"
+
+# Email Settings (Gmail SMTP)
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = "Sender email"
+SENDER_PASSWORD = "16 digit app password to sender email here"  # App password, not your main Gmail password
+RECIPIENT_EMAIL = "recipient email"
+
+TECH_FEEDS = [
+    "http://feeds.bbci.co.uk/news/technology/rss.xml",
+    "https://www.wired.com/feed/rss",
+    "https://techcrunch.com/feed/",
+    "https://www.theverge.com/rss/index.xml"
+]
+# --- Handles SSL Certificate Errors
 if hasattr(ssl, '_create_unverified_context'):
     ssl._create_default_https_context = ssl._create_unverified_context
 
-# --- Configuration ---
-# 1. RSS Feed URL (Topic of Interest)
-SAMPLE_RSS_URL = "http://feeds.bbci.co.uk/news/technology/rss.xml"
-MAX_ARTICLES_TO_PROCESS = 3 # Limiting to 3 as requested for testing
 
-# 2. OpenAI Configuration
-# IMPORTANT: Replace 'YOUR_OPENAI_API_KEY' with your actual key.
-OPENAI_API_KEY = "apikeyhere"
-
-# --- Content Fetching & Scraping ---
+# --- ARTICLE FETCHING ---
 
 def fetch_article_content(url):
-    """
-    Fetches the HTML content of an article URL and attempts to extract
-    the main body text using basic heuristics.
-    
-    NOTE: Web scraping is complex. This is a simple implementation 
-    and may fail on complex websites.
-    """
     try:
-        # Use a common User-Agent to prevent some websites from blocking the request
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Simple heuristic: try to find a container that holds the main article body.
-        # This checks common tags/classes used for article content.
-        article_text = ""
-        
-        # Check for common containers first (article tag, div with specific roles/classes)
-        main_content = soup.find(['article', 'main'], class_=['story-body__inner', 'article-body', 'entry-content', 'td-post-content', 'post-content'])
-        
+
+        main_content = soup.find(['article', 'main'], class_=[
+            'story-body__inner', 'article-body', 'entry-content',
+            'td-post-content', 'post-content'
+        ])
+
         if main_content:
-            # If a main container is found, get all paragraph text within it
             paragraphs = main_content.find_all('p')
-            article_text = "\n".join([p.get_text() for p in paragraphs])
         else:
-            # Fallback: get text from all paragraphs on the page (less reliable)
             paragraphs = soup.find_all('p')
-            article_text = "\n".join([p.get_text() for p in paragraphs])
-            
-        return article_text.strip()
-        
-    except requests.exceptions.RequestException as e:
-        print(f"   [Error Scraping] Failed to fetch article URL: {e}")
-        return ""
+
+        text = "\n".join(p.get_text() for p in paragraphs)
+        return text.strip()
     except Exception as e:
-        print(f"   [Error Scraping] An unexpected error occurred: {e}")
+        print(f"[Error Scraping] {e}")
         return ""
 
-# --- LLM Summarization ---
+
+# --- SUMMARIZATION ---
 
 def summarize_text(article_text, model="gpt-4.1-mini"):
-    """
-    Uses the OpenAI API to generate a concise, email-friendly summary.
-    """
-    if OPENAI_API_KEY == "YOUR_OPENAI_API_KEY":
-        return "ERROR: Please provide your OpenAI API Key in the script configuration."
-
     if not article_text:
-        return "No article content to summarize."
+        return "No content available to summarize."
 
-    # Initialize the OpenAI client
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     system_prompt = (
-        "You are an expert content curator for an email newsletter. "
-        "Your task is to take the provided article text and create a concise, "
-        "one-paragraph summary (maximum 100 words) suitable for a busy, professional audience. "
-        "Focus only on the key takeaways and main impact."
+        "You are an expert tech journalist writing a short AI-powered newsletter. "
+        "Summarize the article in under 100 words, keeping it professional and insightful. "
+        "Focus on key developments, impacts, and why it matters."
     )
 
     try:
-        # Call the OpenAI API
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Summarize this article: {article_text}"}
+                {"role": "user", "content": article_text}
             ],
-            temperature=0.3, # Lower temperature for factual summarization
+            temperature=0.4,
         )
-        
-        # Extract the summary text
-        summary = response.choices[0].message.content
-        return summary
-    
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"An OpenAI API error occurred: {e}"
+        return f"OpenAI API error: {e}"
 
-# --- Main Logic ---
 
-def generate_newsletter_draft(rss_url, max_articles=MAX_ARTICLES_TO_PROCESS):
-    """
-    Fetches, scrapes, and summarizes articles from an RSS feed.
-    """
-    print(f"--- 1. Fetching Feed: {rss_url} ---")
+# --- EMAIL BUILDING AND SENDING (HTML VERSION) ---
+# Defining Email Sending Function w/ necessary pieces
+def send_email(subject, summary, title, link, to_email):
+    try:
+        # Build HTML and plain text versions
+        html_body = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; color: #222; background-color: #f9f9f9; padding: 20px;">
+                <div style="max-width: 600px; margin: auto; background-color: #fff; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 30px;">
+                    <h2 style="color: #2b6cb0;">📰 AI Tech Newsletter</h2>
+                    <h3 style="color: #1a202c;">{title}</h3>
+                    <p style="font-size: 16px; line-height: 1.5;">{summary}</p>
+                    <div style="text-align: center; margin-top: 25px;">
+                        <a href="{link}" target="_blank"
+                           style="background-color: #2b6cb0; color: #fff; text-decoration: none; padding: 12px 25px; border-radius: 6px; font-weight: bold;">
+                           Read Full Article
+                        </a>
+                    </div>
+                    <hr style="margin-top: 30px; border: none; border-top: 1px solid #ddd;">
+                    <p style="font-size: 12px; color: #555; text-align: center;">
+                        Sent by your AI Tech Newsletter<br>
+                        <em>Each run brings you a fresh tech story.</em>
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
 
-    # Fetch and parse the RSS feed
+        plain_text = f"""
+        AI Tech Newsletter
+
+        {title}
+        {summary}
+
+        Read more: {link}
+
+        — AI Tech Newsletter 
+        """
+
+        # Prepare message
+        msg = MIMEMultipart("alternative")
+        msg["From"] = SENDER_EMAIL
+        msg["To"] = to_email
+        msg["Subject"] = subject
+
+        # Attach both plain and HTML versions
+        msg.attach(MIMEText(plain_text, "plain"))
+        msg.attach(MIMEText(html_body, "html"))
+
+        # Send email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASSWORD)
+            server.send_message(msg)
+
+        print(f"[Email Sent] Message successfully delivered to {to_email} ✅")
+
+    except Exception as e:
+        print(f"[Email Error] {e}")
+
+
+# --- MAIN LOGIC ---
+
+def generate_and_email_newsletter():
+    rss_url = random.choice(TECH_FEEDS)
+    print(f"--- Fetching from RSS Feed: {rss_url} ---")
+
     feed = feedparser.parse(rss_url)
-    
-    if feed.bozo:
-        print(f"Warning: RSS feed may be malformed. Error: {feed.bozo_exception}")
-        
     if not feed.entries:
-        print("No entries found in the RSS feed.")
+        print("No entries found.")
         return
 
-    feed_title = feed.feed.get('title', 'Unknown Source')
-    print(f"Source: {feed_title}. Total entries found: {len(feed.entries)}")
-    
-    articles_data = []
+    entry = random.choice(feed.entries)
+    title = entry.get('title', 'No Title')
+    link = entry.get('link', '')
+    print(f"Selected Article: {title}")
 
-    print("\n--- 2. Processing and Summarizing Articles ---")
-    
-    # Iterate for the requested number of articles
-    for i, entry in enumerate(feed.entries):
-        if i >= max_articles:
-            break
-        
-        title = entry.get('title', 'No Title Available')
-        link = entry.get('link', 'No Link Available')
-        
-        print(f"\n[{i + 1}/{max_articles}] Article: '{title}'")
-        
-        # A. Scrape Article Content
-        print("   Scraping article content...")
-        article_content = fetch_article_content(link)
-        
-        if len(article_content) < 50: # Check if content is too short to summarize
-            print("   Warning: Article content is too short or scraping failed. Skipping summary.")
-            summary = "SUMMARY FAILED (Insufficient content)"
-        else:
-            # B. Summarize Content with LLM
-            print("   Generating summary with OpenAI...")
-            summary = summarize_text(article_content)
-        
-        # C. Store and Print Results
-        articles_data.append({
-            'title': title,
-            'link': link,
-            'summary': summary
-        })
-        
-        print("\n--- Summary Output ---")
-        print(f"TITLE: {title}")
-        print(f"SUMMARY:\n{summary}")
-        print("-" * 50)
+    content = fetch_article_content(link)
+    if len(content) < 50:
+        print("Article content too short. Skipping.")
+        return
+
+    summary = summarize_text(content)
+
+    subject = f"AI Tech Brief: {title}"
+    send_email(subject, summary, title, link, RECIPIENT_EMAIL)
 
 
-# --- Example Usage ---
-if __name__ == '__main__':
-    generate_newsletter_draft(rss_url=SAMPLE_RSS_URL)
+# --- RUN ---
+if __name__ == "__main__":
+    generate_and_email_newsletter()
